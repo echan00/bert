@@ -1013,7 +1013,6 @@ def main(_):
           y.append(1)
         else:
           y.append(2)
-      y = y[0:-1]
 
     con_mat = tf.confusion_matrix(labels=y_, predictions=y)
     with tf.Session():
