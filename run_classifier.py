@@ -995,8 +995,7 @@ def main(_):
 
     y_ = []
     for (i, prediction) in enumerate(result):
-      probabilities = prediction["probabilities"]
-      ##output_line = linecache.getline(FLAGS.data_dir+'/test.tsv', i+1)            
+      probabilities = prediction["probabilities"]            
       if probabilities[0] > probabilities[1] and probabilities[0] > probabilities[2]:
         y_.append(0)
       elif probabilities[1] > probabilities[2] and probabilities[1] > probabilities[0]:
@@ -1011,10 +1010,10 @@ def main(_):
           y.append(0)
         elif line.split("\t", 1)[0] == 'not-aligned':
           y.append(1)
-        else:
+        elif line.split("\t", 1)[0] == 'semi-aligned':
           y.append(2)
 
-    con_mat = tf.confusion_matrix(labels=y_, predictions=y)
+    con_mat = tf.confusion_matrix(labels=y, predictions=y_)
     with tf.Session():
       print('Confusion Matrix: \n\n', tf.Tensor.eval(con_mat,feed_dict=None, session=None))
 
