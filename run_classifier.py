@@ -998,19 +998,26 @@ def main(_):
       probabilities = prediction["probabilities"]
       ##output_line = linecache.getline(FLAGS.data_dir+'/test.tsv', i+1)            
       if probabilities[0] > probabilities[1] and probabilities[0] > probabilities[2]:
-        y_.append('aligned')
+        y_.append(0)
       elif probabilities[1] > probabilities[2] and probabilities[1] > probabilities[0]:
-        y_.append('not-aligned')
+        y_.append(1)
       else:
-        y_.append('semi-aligned')
+        y_.append(2)
 
     y = []
     with open(FLAGS.data_dir+'/dev.tsv') as file:
       for line in file:
-        y.append(line.split("\t", 1)[0])
+        if line.split("\t", 1)[0] == 'aligned':
+          y.append(0)
+        elif line.split("\t", 1)[0] == 'not-aligned':
+          y.append(1)
+        else:
+          y.append(2)
+      y = y[0:-1]
 
-    confusion = tf.confusion_matrix(labels=y_, predictions=y, num_classes=num_classes)
-    print(confusion)
+    con_mat = tf.confusion_matrix(labels=y_, predictions=y)
+    with tf.Session():
+      print('Confusion Matrix: \n\n', tf.Tensor.eval(con_mat,feed_dict=None, session=None))
 
   if FLAGS.do_predict:
     predict_examples = processor.get_test_examples(FLAGS.data_dir)
