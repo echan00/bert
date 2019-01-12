@@ -1058,13 +1058,13 @@ def main(_):
               break
             output_line = linecache.getline(FLAGS.data_dir+'/test.tsv', i+1)            
             if probabilities[0] > probabilities[1] and probabilities[0] > probabilities[2]:
-              output_line = output_line.replace("0", probabilities[0], 1)
+              output_line = output_line.replace("0", str(probabilities[0]), 1)
               align_file.write(output_line)
             elif probabilities[1] > probabilities[2] and probabilities[1] > probabilities[0]:
-              output_line = output_line.replace("0", probabilities[1], 1)
+              output_line = output_line.replace("0", str(probabilities[1]), 1)
               not_align_file.write(output_line)
             else:
-              output_line = output_line.replace("0", probabilities[2], 1)
+              output_line = output_line.replace("0", str(probabilities[2]), 1)
               semi_align_file.write(output_line)                            
             num_written_lines += 1
     assert num_written_lines == num_actual_predict_examples
