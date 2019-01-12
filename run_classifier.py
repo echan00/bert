@@ -25,6 +25,7 @@ import modeling
 import optimization
 import tokenization
 import tensorflow as tf
+import linecache
 
 flags = tf.flags
 
@@ -74,6 +75,10 @@ flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
 flags.DEFINE_bool(
     "do_predict", False,
     "Whether to run the model in inference mode on the test set.")
+
+flags.DEFINE_bool(
+    "do_tfx_predict", False,
+    "Whether to run the model in inference mode on the test set (and output stats and output separate files by class).")
 
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
@@ -411,6 +416,10 @@ class ColaProcessor(DataProcessor):
           InputExample(guid=guid, text_a=text_a, text_b=None, label=label))
     return examples
 
+def chomp(x):
+    if x.endswith("\r\n"): return x[:-2]
+    if x.endswith("\n") or x.endswith("\r"): return x[:-1]
+    return x
 
 def convert_single_example(ex_index, example, label_list, max_seq_length,
                            tokenizer):
@@ -832,7 +841,7 @@ def main(_):
   tokenization.validate_case_matches_checkpoint(FLAGS.do_lower_case,
                                                 FLAGS.init_checkpoint)
 
-  if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_predict:
+  if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_predict and not FLAGS.do_tfx_predict:
     raise ValueError(
         "At least one of `do_train`, `do_eval` or `do_predict' must be True.")
 
@@ -1010,6 +1019,55 @@ def main(_):
         num_written_lines += 1
     assert num_written_lines == num_actual_predict_examples
 
+  if FLAGS.do_tfx_predict:
+    predict_examples = processor.get_test_examples(FLAGS.data_dir)
+    num_actual_predict_examples = len(predict_examples)
+
+    predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
+    file_based_convert_examples_to_features(predict_examples, label_list,
+                                            FLAGS.max_seq_length, tokenizer,
+                                            predict_file)
+
+    tf.logging.info("***** Running prediction*****")
+    tf.logging.info("  Num examples = %d (%d actual, %d padding)",
+                    len(predict_examples), num_actual_predict_examples,
+                    len(predict_examples) - num_actual_predict_examples)
+    tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
+
+    predict_drop_remainder = True if FLAGS.use_tpu else False
+    predict_input_fn = file_based_input_fn_builder(
+        input_file=predict_file,
+        seq_length=FLAGS.max_seq_length,
+        is_training=False,
+        drop_remainder=predict_drop_remainder)
+
+    result = estimator.predict(input_fn=predict_input_fn)
+
+    output_align_file = os.path.join(FLAGS.output_dir, "align_results.tsv")
+    output_not_align_file = os.path.join(FLAGS.output_dir, "not_align_results.tsv")
+    output_semi_align_file = os.path.join(FLAGS.output_dir, "semi_align_results.tsv")
+
+    with tf.gfile.GFile(output_align_file, "w") as align_file:
+      with tf.gfile.GFile(output_not_align_file, "w") as not_align_file:
+        with tf.gfile.GFile(output_semi_align_file, "w") as semi_align_file:
+          num_written_lines = 0
+          tf.logging.info("***** Predict results *****")
+          for (i, prediction) in enumerate(result):
+            probabilities = prediction["probabilities"]
+            if i >= num_actual_predict_examples:
+              break
+            output_line = linecache.getline(FLAGS.data_dir+'/test.tsv', i+1)            
+            if probabilities[0] > probabilities[1] and probabilities[0] > probabilities[2]:
+              output_line = output_line.replace("0", probabilities[0], 1)
+              align_file.write(output_line)
+            elif probabilities[1] > probabilities[2] and probabilities[1] > probabilities[0]:
+              output_line = output_line.replace("0", probabilities[1], 1)
+              not_align_file.write(output_line)
+            else:
+              output_line = output_line.replace("0", probabilities[2], 1)
+              semi_align_file.write(output_line)                            
+            num_written_lines += 1
+    assert num_written_lines == num_actual_predict_examples
 
 if __name__ == "__main__":
   flags.mark_flag_as_required("data_dir")
