@@ -72,6 +72,8 @@ flags.DEFINE_bool("do_train", False, "Whether to run training.")
 
 flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
 
+flags.DEFINE_bool("do_tfx_eval", False, "Whether to run eval on the dev set.")
+
 flags.DEFINE_bool(
     "do_predict", False,
     "Whether to run the model in inference mode on the test set.")
@@ -841,7 +843,7 @@ def main(_):
   tokenization.validate_case_matches_checkpoint(FLAGS.do_lower_case,
                                                 FLAGS.init_checkpoint)
 
-  if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_predict and not FLAGS.do_tfx_predict:
+  if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_tfx_eval and not FLAGS.do_predict and not FLAGS.do_tfx_predict:
     raise ValueError(
         "At least one of `do_train`, `do_eval` or `do_predict' must be True.")
 
@@ -973,6 +975,43 @@ def main(_):
         tf.logging.info("  %s = %s", key, str(result[key]))
         writer.write("%s = %s\n" % (key, str(result[key])))
 
+
+  if FLAGS.do_tfx_eval:
+    eval_examples = processor.get_dev_examples(FLAGS.data_dir)
+    num_actual_eval_examples = len(eval_examples)
+    
+    eval_file = os.path.join(FLAGS.output_dir, "eval.tf_record")
+    file_based_convert_examples_to_features(
+        eval_examples, label_list, FLAGS.max_seq_length, tokenizer, eval_file)
+
+    eval_drop_remainder = True if FLAGS.use_tpu else False
+    eval_input_fn = file_based_input_fn_builder(
+        input_file=eval_file,
+        seq_length=FLAGS.max_seq_length,
+        is_training=False,
+        drop_remainder=eval_drop_remainder)
+
+    result = estimator.predict(input_fn=eval_input_fn)
+
+    y_ = []
+    for (i, prediction) in enumerate(result):
+      probabilities = prediction["probabilities"]
+      ##output_line = linecache.getline(FLAGS.data_dir+'/test.tsv', i+1)            
+      if probabilities[0] > probabilities[1] and probabilities[0] > probabilities[2]:
+        y_.append('aligned')
+      elif probabilities[1] > probabilities[2] and probabilities[1] > probabilities[0]:
+        y_.append('not-aligned')
+      else:
+        y_.append('semi-aligned')
+
+    y = []
+    with open(FLAGS.data_dir+'/dev.tsv') as file:
+      for line in file:
+        y.append(line.split("\t", 1)[0])
+
+    confusion = tf.confusion_matrix(labels=y_, predictions=y, num_classes=num_classes)
+    print(confusion)
+
   if FLAGS.do_predict:
     predict_examples = processor.get_test_examples(FLAGS.data_dir)
     num_actual_predict_examples = len(predict_examples)
@@ -1058,13 +1097,13 @@ def main(_):
               break
             output_line = linecache.getline(FLAGS.data_dir+'/test.tsv', i+1)            
             if probabilities[0] > probabilities[1] and probabilities[0] > probabilities[2]:
-              output_line = output_line.replace("0", str(probabilities[0]), 1)
+              output_line = output_line.replace("0", probabilities[0], 1)
               align_file.write(output_line)
             elif probabilities[1] > probabilities[2] and probabilities[1] > probabilities[0]:
-              output_line = output_line.replace("0", str(probabilities[1]), 1)
+              output_line = output_line.replace("0", probabilities[1], 1)
               not_align_file.write(output_line)
             else:
-              output_line = output_line.replace("0", str(probabilities[2]), 1)
+              output_line = output_line.replace("0", probabilities[2], 1)
               semi_align_file.write(output_line)                            
             num_written_lines += 1
     assert num_written_lines == num_actual_predict_examples
