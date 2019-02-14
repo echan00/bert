@@ -24,7 +24,6 @@ python run_classifier.py \
   --do_lower_case=False
 
 # EVAL
-
 python run_classifier.py \
   --task_name=supe \
   --do_tfx_eval=true \
@@ -37,7 +36,7 @@ python run_classifier.py \
   --do_lower_case=False
 
 # INFERENCE
-
+# takes all files test* in data_dir for inference, each file should have lines "0 \t sentence1 \t sentence2"
 python run_classifier.py \
   --task_name=supe \
   --do_tfx_predict=true \
@@ -47,28 +46,4 @@ python run_classifier.py \
   --init_checkpoint=/home/eee/bert/model/multi_cased_L-12_H-768_A-12/bert_model.ckpt \
   --max_seq_length=128 \
   --output_dir=/home/eee/bert/output_feb_11_augment/ \
-  --do_lower_case=False
-
-
-
-# HOROVOD (DOESN'T WORK)
-
-mpirun -np 7 \
-    -H localhost:7 \
-    -bind-to none -map-by slot \
-    -x NCCL_DEBUG=INFO -x LD_LIBRARY_PATH -x PATH \
-    -mca pml ob1 -mca btl ^openib \
-    python run_classifier_horovod.py \
-  --task_name=supe \
-  --do_train=true \
-  --do_eval=true \
-  --data_dir=/home/eee/bert/data \
-  --vocab_file=/home/eee/bert/model/multi_cased_L-12_H-768_A-12/vocab.txt \
-  --bert_config_file=/home/eee/bert/model/multi_cased_L-12_H-768_A-12/bert_config.json \
-  --init_checkpoint=/home/eee/bert/model/multi_cased_L-12_H-768_A-12/bert_model.ckpt \
-  --max_seq_length=128 \
-  --train_batch_size=32 \
-  --learning_rate=2e-5 \
-  --num_train_epochs=5.0 \
-  --output_dir=/home/eee/bert/output_jan_26_base_horovod \
   --do_lower_case=False
