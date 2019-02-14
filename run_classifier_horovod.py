@@ -20,18 +20,17 @@ from __future__ import print_function
 
 import collections
 import csv
-import os, sys, glob
+import os
 import modeling
 import optimization
 import tokenization
 import tensorflow as tf
+import horovod.tensorflow as hvd
 import linecache
 
 flags = tf.flags
 
 FLAGS = flags.FLAGS
-
-#os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
 ## Required parameters
 flags.DEFINE_string(
@@ -205,12 +204,141 @@ class DataProcessor(object):
   @classmethod
   def _read_tsv(cls, input_file, quotechar=None):
     """Reads a tab separated value file."""
-    with tf.gfile.Open(input_file, "r") as f:      
-      reader = csv.reader((x.replace('\0','') for x in f), delimiter="\t", quotechar=quotechar)
+    with tf.gfile.Open(input_file, "r") as f:
+      reader = csv.reader(f, delimiter="\t", quotechar=quotechar)
       lines = []
       for line in reader:
         lines.append(line)
       return lines
+
+
+class XnliProcessor(DataProcessor):
+  """Processor for the XNLI data set."""
+
+  def __init__(self):
+    self.language = "zh"
+
+  def get_train_examples(self, data_dir):
+    """See base class."""
+    lines = self._read_tsv(
+        os.path.join(data_dir, "multinli",
+                     "multinli.train.%s.tsv" % self.language))
+    examples = []
+    for (i, line) in enumerate(lines):
+      if i == 0:
+        continue
+      guid = "train-%d" % (i)
+      text_a = tokenization.convert_to_unicode(line[0])
+      text_b = tokenization.convert_to_unicode(line[1])
+      label = tokenization.convert_to_unicode(line[2])
+      if label == tokenization.convert_to_unicode("contradictory"):
+        label = tokenization.convert_to_unicode("contradiction")
+      examples.append(
+          InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+    return examples
+
+  def get_dev_examples(self, data_dir):
+    """See base class."""
+    lines = self._read_tsv(os.path.join(data_dir, "xnli.dev.tsv"))
+    examples = []
+    for (i, line) in enumerate(lines):
+      if i == 0:
+        continue
+      guid = "dev-%d" % (i)
+      language = tokenization.convert_to_unicode(line[0])
+      if language != tokenization.convert_to_unicode(self.language):
+        continue
+      text_a = tokenization.convert_to_unicode(line[6])
+      text_b = tokenization.convert_to_unicode(line[7])
+      label = tokenization.convert_to_unicode(line[1])
+      examples.append(
+          InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+    return examples
+
+  def get_labels(self):
+    """See base class."""
+    return ["contradiction", "entailment", "neutral"]
+
+
+class MnliProcessor(DataProcessor):
+  """Processor for the MultiNLI data set (GLUE version)."""
+
+  def get_train_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
+
+  def get_dev_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_tsv(os.path.join(data_dir, "dev_matched.tsv")),
+        "dev_matched")
+
+  def get_test_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_tsv(os.path.join(data_dir, "test_matched.tsv")), "test")
+
+  def get_labels(self):
+    """See base class."""
+    return ["contradiction", "entailment", "neutral"]
+
+  def _create_examples(self, lines, set_type):
+    """Creates examples for the training and dev sets."""
+    examples = []
+    for (i, line) in enumerate(lines):
+      if i == 0:
+        continue
+      guid = "%s-%s" % (set_type, tokenization.convert_to_unicode(line[0]))
+      text_a = tokenization.convert_to_unicode(line[8])
+      text_b = tokenization.convert_to_unicode(line[9])
+      if set_type == "test":
+        label = "contradiction"
+      else:
+        label = tokenization.convert_to_unicode(line[-1])
+      examples.append(
+          InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+    return examples
+
+
+class MrpcProcessor(DataProcessor):
+  """Processor for the MRPC data set (GLUE version)."""
+
+  def get_train_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
+
+  def get_dev_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev")
+
+  def get_test_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_tsv(os.path.join(data_dir, "test.tsv")), "test")
+
+  def get_labels(self):
+    """See base class."""
+    return ["0", "1"]
+
+  def _create_examples(self, lines, set_type):
+    """Creates examples for the training and dev sets."""
+    examples = []
+    for (i, line) in enumerate(lines):
+      if i == 0:
+        continue
+      guid = "%s-%s" % (set_type, i)
+      text_a = tokenization.convert_to_unicode(line[3])
+      text_b = tokenization.convert_to_unicode(line[4])
+      if set_type == "test":
+        label = "0"
+      else:
+        label = tokenization.convert_to_unicode(line[0])
+      examples.append(
+          InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+    return examples
 
 class SupervisorProcessor(DataProcessor):
   """Processor for the Supervisor data."""
@@ -225,10 +353,10 @@ class SupervisorProcessor(DataProcessor):
     return self._create_examples(
         self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev")
 
-  def get_test_examples(self, data_dir, filename):
+  def get_test_examples(self, data_dir):
     """See base class."""
     return self._create_examples(
-        self._read_tsv(os.path.join(data_dir, filename)), "test")
+        self._read_tsv(os.path.join(data_dir, "test.tsv")), "test")
 
   def get_labels(self):
     """See base class."""
@@ -241,23 +369,54 @@ class SupervisorProcessor(DataProcessor):
       if i == 0:
         continue
       guid = "%s-%s" % (set_type, i)
-      try:
-        text_a = tokenization.convert_to_unicode(line[1])
-      except:
-        text_a = ' '
-      try:
-        text_b = tokenization.convert_to_unicode(line[2])
-      except:
-        text_b = ' '
-      if text_a == ' ' or text_b == ' ':
-        text_a = ' ' 
-        text_b = ' '
+      text_a = tokenization.convert_to_unicode(line[1])
+      text_b = tokenization.convert_to_unicode(line[2])
       if set_type == "test":
         label = "aligned"
       else:
         label = tokenization.convert_to_unicode(line[0])
       examples.append(
           InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+    return examples
+
+class ColaProcessor(DataProcessor):
+  """Processor for the CoLA data set (GLUE version)."""
+
+  def get_train_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
+
+  def get_dev_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev")
+
+  def get_test_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_tsv(os.path.join(data_dir, "test.tsv")), "test")
+
+  def get_labels(self):
+    """See base class."""
+    return ["0", "1"]
+
+  def _create_examples(self, lines, set_type):
+    """Creates examples for the training and dev sets."""
+    examples = []
+    for (i, line) in enumerate(lines):
+      # Only the test set has a header
+      if set_type == "test" and i == 0:
+        continue
+      guid = "%s-%s" % (set_type, i)
+      if set_type == "test":
+        text_a = tokenization.convert_to_unicode(line[1])
+        label = "0"
+      else:
+        text_a = tokenization.convert_to_unicode(line[3])
+        label = tokenization.convert_to_unicode(line[1])
+      examples.append(
+          InputExample(guid=guid, text_a=text_a, text_b=None, label=label))
     return examples
 
 def chomp(x):
@@ -561,9 +720,12 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
 
     output_spec = None
     if mode == tf.estimator.ModeKeys.TRAIN:
-
+      # Horovod: scale learning rate by the number of workers.
       train_op = optimization.create_optimizer(
-          total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
+          total_loss, learning_rate * hvd.size(), num_train_steps, num_warmup_steps, use_tpu, hvd)
+
+      # Horovod: add Horovod Distributed Optimizer.
+      # train_op = hvd.DistributedOptimizer(train_op)
 
       output_spec = tf.contrib.tpu.TPUEstimatorSpec(
           mode=mode,
@@ -675,6 +837,10 @@ def main(_):
   tf.logging.set_verbosity(tf.logging.INFO)
 
   processors = {
+      "cola": ColaProcessor,
+      "mnli": MnliProcessor,
+      "mrpc": MrpcProcessor,
+      "xnli": XnliProcessor,
       "supe": SupervisorProcessor,
   }
 
@@ -693,7 +859,21 @@ def main(_):
         "was only trained up to sequence length %d" %
         (FLAGS.max_seq_length, bert_config.max_position_embeddings))
 
-  tf.gfile.MakeDirs(FLAGS.output_dir)
+  # Horovod: initialize Horovod.
+  hvd.init()
+  # Horovod: pin GPU to be used to process local rank (one GPU per process)
+  config = tf.ConfigProto()
+  config.gpu_options.allow_growth = True
+  config.gpu_options.visible_device_list = str(hvd.local_rank())
+
+  small_cfg = tf.ConfigProto()
+  small_cfg.gpu_options.allow_growth = True
+  with tf.Session(config=small_cfg):
+      pass
+
+  # Horovod: save checkpoints only on worker 0 to prevent other workers from
+  # corrupting them.
+  tf.gfile.MakeDirs(FLAGS.output_dir) if hvd.rank() == 0 else None
 
   task_name = FLAGS.task_name.lower()
 
@@ -760,12 +940,70 @@ def main(_):
     tf.logging.info("  Num examples = %d", len(train_examples))
     tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
     tf.logging.info("  Num steps = %d", num_train_steps)
+
+    # Horovod: BroadcastGlobalVariablesHook broadcasts initial variable states from
+    # rank 0 to all other processes. This is necessary to ensure consistent
+    # initialization of all workers when training is started with random weights or
+    # restored from a checkpoint.
+    bcast_hook = hvd.BroadcastGlobalVariablesHook(0)
+
     train_input_fn = file_based_input_fn_builder(
         input_file=train_file,
         seq_length=FLAGS.max_seq_length,
         is_training=True,
         drop_remainder=True)
-    estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
+
+    # Horovod: adjust number of steps based on number of GPUs.
+    estimator.train(input_fn=train_input_fn, 
+      max_steps=num_train_steps//hvd.size(), 
+      hooks=[bcast_hook]
+    )
+
+  if FLAGS.do_eval:
+    eval_examples = processor.get_dev_examples(FLAGS.data_dir)
+    num_actual_eval_examples = len(eval_examples)
+    if FLAGS.use_tpu:
+      # TPU requires a fixed batch size for all batches, therefore the number
+      # of examples must be a multiple of the batch size, or else examples
+      # will get dropped. So we pad with fake examples which are ignored
+      # later on. These do NOT count towards the metric (all tf.metrics
+      # support a per-instance weight, and these get a weight of 0.0).
+      while len(eval_examples) % FLAGS.eval_batch_size != 0:
+        eval_examples.append(PaddingInputExample())
+
+    eval_file = os.path.join(FLAGS.output_dir, "eval.tf_record")
+    file_based_convert_examples_to_features(
+        eval_examples, label_list, FLAGS.max_seq_length, tokenizer, eval_file)
+
+    tf.logging.info("***** Running evaluation *****")
+    tf.logging.info("  Num examples = %d (%d actual, %d padding)",
+                    len(eval_examples), num_actual_eval_examples,
+                    len(eval_examples) - num_actual_eval_examples)
+    tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
+
+    # This tells the estimator to run through the entire set.
+    eval_steps = None
+    # However, if running eval on the TPU, you will need to specify the
+    # number of steps.
+    if FLAGS.use_tpu:
+      assert len(eval_examples) % FLAGS.eval_batch_size == 0
+      eval_steps = int(len(eval_examples) // FLAGS.eval_batch_size)
+
+    eval_drop_remainder = True if FLAGS.use_tpu else False
+    eval_input_fn = file_based_input_fn_builder(
+        input_file=eval_file,
+        seq_length=FLAGS.max_seq_length,
+        is_training=False,
+        drop_remainder=eval_drop_remainder)
+
+    result = estimator.evaluate(input_fn=eval_input_fn, steps=eval_steps)
+
+    output_eval_file = os.path.join(FLAGS.output_dir, "eval_results.txt")
+    with tf.gfile.GFile(output_eval_file, "w") as writer:
+      tf.logging.info("***** Eval results *****")
+      for key in sorted(result.keys()):
+        tf.logging.info("  %s = %s", key, str(result[key]))
+        writer.write("%s = %s\n" % (key, str(result[key])))
 
 
   if FLAGS.do_tfx_eval:
@@ -815,52 +1053,101 @@ def main(_):
     with tf.Session():
       print('Confusion Matrix: \n\n', tf.Tensor.eval(con_mat,feed_dict=None, session=None))
 
+  if FLAGS.do_predict:
+    predict_examples = processor.get_test_examples(FLAGS.data_dir)
+    num_actual_predict_examples = len(predict_examples)
+    if FLAGS.use_tpu:
+      # TPU requires a fixed batch size for all batches, therefore the number
+      # of examples must be a multiple of the batch size, or else examples
+      # will get dropped. So we pad with fake examples which are ignored
+      # later on.
+      while len(predict_examples) % FLAGS.predict_batch_size != 0:
+        predict_examples.append(PaddingInputExample())
+
+    predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
+    file_based_convert_examples_to_features(predict_examples, label_list,
+                                            FLAGS.max_seq_length, tokenizer,
+                                            predict_file)
+
+    tf.logging.info("***** Running prediction*****")
+    tf.logging.info("  Num examples = %d (%d actual, %d padding)",
+                    len(predict_examples), num_actual_predict_examples,
+                    len(predict_examples) - num_actual_predict_examples)
+    tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
+
+    predict_drop_remainder = True if FLAGS.use_tpu else False
+    predict_input_fn = file_based_input_fn_builder(
+        input_file=predict_file,
+        seq_length=FLAGS.max_seq_length,
+        is_training=False,
+        drop_remainder=predict_drop_remainder)
+
+    result = estimator.predict(input_fn=predict_input_fn)
+
+    output_predict_file = os.path.join(FLAGS.output_dir, "test_results.tsv")
+    with tf.gfile.GFile(output_predict_file, "w") as writer:
+      num_written_lines = 0
+      tf.logging.info("***** Predict results *****")
+      for (i, prediction) in enumerate(result):
+        probabilities = prediction["probabilities"]
+        if i >= num_actual_predict_examples:
+          break
+        output_line = "\t".join(
+            str(class_probability)
+            for class_probability in probabilities) + "\n"
+        writer.write(output_line)
+        num_written_lines += 1
+    assert num_written_lines == num_actual_predict_examples
+
   if FLAGS.do_tfx_predict:
-    # each predict file can only be 100000k big
-    # Use: split -b 100000k AAA.tsv test.tsv
-    os.chdir("./data")
-    for filename in glob.glob("test*"):
-      predict_examples = processor.get_test_examples(FLAGS.data_dir, filename)
-      num_actual_predict_examples = len(predict_examples)
+    predict_examples = processor.get_test_examples(FLAGS.data_dir)
+    num_actual_predict_examples = len(predict_examples)
 
-      predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
-      file_based_convert_examples_to_features(predict_examples, label_list,
-                                              FLAGS.max_seq_length, tokenizer,
-                                              predict_file)
+    predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
+    file_based_convert_examples_to_features(predict_examples, label_list,
+                                            FLAGS.max_seq_length, tokenizer,
+                                            predict_file)
 
-      tf.logging.info("***** Running prediction*****")
-      tf.logging.info("  Num examples = %d (%d actual, %d padding)",
-                      len(predict_examples), num_actual_predict_examples,
-                      len(predict_examples) - num_actual_predict_examples)
-      tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
+    tf.logging.info("***** Running prediction*****")
+    tf.logging.info("  Num examples = %d (%d actual, %d padding)",
+                    len(predict_examples), num_actual_predict_examples,
+                    len(predict_examples) - num_actual_predict_examples)
+    tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
 
-      predict_drop_remainder = True if FLAGS.use_tpu else False
-      predict_input_fn = file_based_input_fn_builder(
-          input_file=predict_file,
-          seq_length=FLAGS.max_seq_length,
-          is_training=False,
-          drop_remainder=predict_drop_remainder)
+    predict_drop_remainder = True if FLAGS.use_tpu else False
+    predict_input_fn = file_based_input_fn_builder(
+        input_file=predict_file,
+        seq_length=FLAGS.max_seq_length,
+        is_training=False,
+        drop_remainder=predict_drop_remainder)
 
-      result = estimator.predict(input_fn=predict_input_fn)
+    result = estimator.predict(input_fn=predict_input_fn)
 
-      with open(FLAGS.data_dir+'/align_results.tsv', 'a+') as align_file:
-        with open(FLAGS.data_dir+'/not_align_results.tsv', 'a+') as not_align_file:
-          with open(FLAGS.data_dir+'/semi_align_results.tsv', 'a+') as semi_align_file:
-            num_written_lines = 0
-            tf.logging.info("***** Predict results *****")
-            for (i, prediction) in enumerate(result):
-              probabilities = prediction["probabilities"]
-              if i >= num_actual_predict_examples:
-                break
-              output_line = linecache.getline(FLAGS.data_dir+'/'+filename, i+2)
-              if probabilities[0] > probabilities[1] and probabilities[0] > probabilities[2]:                
-                align_file.write(output_line)
-              elif probabilities[1] > probabilities[2] and probabilities[1] > probabilities[0]:                
-                not_align_file.write(output_line)
-              else:                
-                semi_align_file.write(output_line)                            
-              num_written_lines += 1
-      assert num_written_lines == num_actual_predict_examples
+    output_align_file = os.path.join(FLAGS.output_dir, "align_results.tsv")
+    output_not_align_file = os.path.join(FLAGS.output_dir, "not_align_results.tsv")
+    output_semi_align_file = os.path.join(FLAGS.output_dir, "semi_align_results.tsv")
+
+    with tf.gfile.GFile(output_align_file, "w") as align_file:
+      with tf.gfile.GFile(output_not_align_file, "w") as not_align_file:
+        with tf.gfile.GFile(output_semi_align_file, "w") as semi_align_file:
+          num_written_lines = 0
+          tf.logging.info("***** Predict results *****")
+          for (i, prediction) in enumerate(result):
+            probabilities = prediction["probabilities"]
+            if i >= num_actual_predict_examples:
+              break
+            output_line = linecache.getline(FLAGS.data_dir+'/test.tsv', i+1)            
+            if probabilities[0] > probabilities[1] and probabilities[0] > probabilities[2]:
+              output_line = output_line.replace("0", probabilities[0], 1)
+              align_file.write(output_line)
+            elif probabilities[1] > probabilities[2] and probabilities[1] > probabilities[0]:
+              output_line = output_line.replace("0", probabilities[1], 1)
+              not_align_file.write(output_line)
+            else:
+              output_line = output_line.replace("0", probabilities[2], 1)
+              semi_align_file.write(output_line)                            
+            num_written_lines += 1
+    assert num_written_lines == num_actual_predict_examples
 
 if __name__ == "__main__":
   flags.mark_flag_as_required("data_dir")
