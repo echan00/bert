@@ -20,7 +20,7 @@ from __future__ import print_function
 
 import collections
 import csv
-import os, sys, glob
+import os, sys, glob, re
 import modeling
 import optimization
 import tokenization
@@ -796,16 +796,18 @@ def main(_):
         y_.append(2)
 
     y = []
-    with open(FLAGS.data_dir+'/dev.tsv') as file:
+    with open(FLAGS.data_dir+'/dev.tsv', mode='r', encoding='utf-8') as file:
       for line in file:
-        if line.split("\t", 1)[0] == 'aligned':
+        if line.split("\t", 1)[0] == 'great-aligned':
           y.append(0)
-        elif line.split("\t", 1)[0] == 'not-aligned':
+        elif line.split("\t", 1)[0] == 'good-aligned':
           y.append(1)
-        elif line.split("\t", 1)[0] == 'semi-aligned':
+        elif line.split("\t", 1)[0] == 'not-aligned':
           y.append(2)
+        elif line.split("\t", 1)[0] == 'semi-aligned':
+          y.append(3)
 
-    with open(FLAGS.data_dir+'/incorrect.tsv', 'w+') as new_file:
+    with open(FLAGS.data_dir+'/incorrect.tsv', mode='w+', encoding='utf-8') as new_file:
       new_file.write("actual\tprediction\tsentence-1\tsentence-2\n")
       for idx, val in enumerate(y_):
         if val != y[idx]:
@@ -820,47 +822,53 @@ def main(_):
     # Use: split -b 100000k AAA.tsv test.tsv
     os.chdir("./data")
     for filename in glob.glob("test*"):
-      predict_examples = processor.get_test_examples(FLAGS.data_dir, filename)
-      num_actual_predict_examples = len(predict_examples)
+      exists = os.path.isfile(FLAGS.data_dir+'/results/good_align_'+re.split('[.]',filename)[1]+'.tsv')
+      if not exists:
+        print(filename)
+        predict_examples = processor.get_test_examples(FLAGS.data_dir, filename)
+        num_actual_predict_examples = len(predict_examples)
 
-      predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
-      file_based_convert_examples_to_features(predict_examples, label_list,
-                                              FLAGS.max_seq_length, tokenizer,
-                                              predict_file)
+        predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
+        file_based_convert_examples_to_features(predict_examples, label_list,
+                                                FLAGS.max_seq_length, tokenizer,
+                                                predict_file)
 
-      tf.logging.info("***** Running prediction*****")
-      tf.logging.info("  Num examples = %d (%d actual, %d padding)",
-                      len(predict_examples), num_actual_predict_examples,
-                      len(predict_examples) - num_actual_predict_examples)
-      tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
+        tf.logging.info("***** Running prediction*****")
+        tf.logging.info("  Num examples = %d (%d actual, %d padding)",
+                        len(predict_examples), num_actual_predict_examples,
+                        len(predict_examples) - num_actual_predict_examples)
+        tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
 
-      predict_drop_remainder = True if FLAGS.use_tpu else False
-      predict_input_fn = file_based_input_fn_builder(
-          input_file=predict_file,
-          seq_length=FLAGS.max_seq_length,
-          is_training=False,
-          drop_remainder=predict_drop_remainder)
+        predict_drop_remainder = True if FLAGS.use_tpu else False
+        predict_input_fn = file_based_input_fn_builder(
+            input_file=predict_file,
+            seq_length=FLAGS.max_seq_length,
+            is_training=False,
+            drop_remainder=predict_drop_remainder)
 
-      result = estimator.predict(input_fn=predict_input_fn)
+        result = estimator.predict(input_fn=predict_input_fn)
 
-      with open(FLAGS.data_dir+'/align_results.tsv', 'a+') as align_file:
-        with open(FLAGS.data_dir+'/not_align_results.tsv', 'a+') as not_align_file:
-          with open(FLAGS.data_dir+'/semi_align_results.tsv', 'a+') as semi_align_file:
-            num_written_lines = 0
-            tf.logging.info("***** Predict results *****")
-            for (i, prediction) in enumerate(result):
-              probabilities = prediction["probabilities"]
-              if i >= num_actual_predict_examples:
-                break
-              output_line = linecache.getline(FLAGS.data_dir+'/'+filename, i+2)
-              if probabilities[0] > probabilities[1] and probabilities[0] > probabilities[2]:                
-                align_file.write(output_line)
-              elif probabilities[1] > probabilities[2] and probabilities[1] > probabilities[0]:                
-                not_align_file.write(output_line)
-              else:                
-                semi_align_file.write(output_line)                            
-              num_written_lines += 1
-      assert num_written_lines == num_actual_predict_examples
+        with open(FLAGS.data_dir+'/results/great_align_'+re.split('[.]',filename)[1]+'.tsv', mode='w', encoding='utf-8') as great_align_file:
+          with open(FLAGS.data_dir+'/results/good_align_'+re.split('[.]',filename)[1]+'.tsv', mode='w', encoding='utf-8') as good_align_file:
+            with open(FLAGS.data_dir+'/results/not_align_'+re.split('[.]',filename)[1]+'.tsv', mode='w', encoding='utf-8') as not_align_file:
+              with open(FLAGS.data_dir+'/results/semi_align_'+re.split('[.]',filename)[1]+'.tsv', mode='w', encoding='utf-8') as semi_align_file:            
+                num_written_lines = 0
+                tf.logging.info("***** Predict results *****")
+                for (i, prediction) in enumerate(result):
+                  probabilities = prediction["probabilities"]
+                  if i >= num_actual_predict_examples:
+                    break
+                  output_line = linecache.getline(FLAGS.data_dir+'/'+filename, i+2)
+                  if probabilities[0] > probabilities[1] and probabilities[0] > probabilities[2] and probabilities[0] > probabilities[3]:
+                    great_align_file.write(output_line)
+                  elif probabilities[1] > probabilities[2] and probabilities[1] > probabilities[0] and and probabilities[1] > probabilities[3]:                
+                    good_align_file.write(output_line)                    
+                  elif probabilities[2] > probabilities[0] and probabilities[2] > probabilities[1] and and probabilities[2] > probabilities[3]:                
+                    not_align_file.write(output_line)
+                  else:                
+                    semi_align_file.write(output_line)                            
+                  num_written_lines += 1
+        assert num_written_lines == num_actual_predict_examples
 
 if __name__ == "__main__":
   flags.mark_flag_as_required("data_dir")
