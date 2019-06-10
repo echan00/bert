@@ -22,10 +22,11 @@ import collections
 import csv
 import os, sys, glob, re
 import modeling
-import optimization
+import optimization_hvd
 import tokenization
 import tensorflow as tf
 import linecache
+import horovod.tensorflow as hvd
 
 flags = tf.flags
 
@@ -52,10 +53,6 @@ flags.DEFINE_string("vocab_file", None,
 flags.DEFINE_string(
     "output_dir", None,
     "The output directory where the model checkpoints will be written.")
-
-flags.DEFINE_string(
-    "export_dir", None,
-    "The dir where the exported model will be written.")
 
 ## Other parameters
 
@@ -87,10 +84,6 @@ flags.DEFINE_bool(
 flags.DEFINE_bool(
     "do_tfx_predict", False,
     "Whether to run the model in inference mode on the test set (and output stats and output separate files by class).")
-
-flags.DEFINE_bool(
-    "do_export", False,
-    "Export the model for serving.")
 
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
@@ -261,7 +254,7 @@ class SupervisorProcessor(DataProcessor):
         text_a = ' ' 
         text_b = ' '
       if set_type == "test":
-        label = "great-aligned"
+        label = "aligned"
       else:
         label = tokenization.convert_to_unicode(line[0])
       examples.append(
@@ -295,9 +288,6 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
     tokens_b = tokenizer.tokenize(example.text_b)
 
   if tokens_b:
-    total_length = len(tokens_a) + len(tokens_b)
-    if total_length > max_seq_length:
-      print("TOO LONG: "+str(total_length))    
     # Modifies `tokens_a` and `tokens_b` in place so that the total
     # length is less than the specified length.
     # Account for [CLS], [SEP], [SEP] with "- 3"
@@ -455,6 +445,7 @@ def file_based_input_fn_builder(input_file, seq_length, is_training,
 
   return input_fn
 
+
 def _truncate_seq_pair(tokens_a, tokens_b, max_length):
   """Truncates a sequence pair in place to the maximum length."""
 
@@ -572,7 +563,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
     output_spec = None
     if mode == tf.estimator.ModeKeys.TRAIN:
 
-      train_op = optimization.create_optimizer(
+      train_op = optimization_hvd.create_optimizer(
           total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
 
       output_spec = tf.contrib.tpu.TPUEstimatorSpec(
@@ -681,21 +672,10 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
   return features
 
 
-def serving_input_fn():
-  label_ids = tf.placeholder(tf.int32, [None], name='label_ids')
-  input_ids = tf.placeholder(tf.int32, [None, FLAGS.max_seq_length], name='input_ids')
-  input_mask = tf.placeholder(tf.int32, [None, FLAGS.max_seq_length], name='input_mask')
-  segment_ids = tf.placeholder(tf.int32, [None, FLAGS.max_seq_length], name='segment_ids')
-  input_fn = tf.estimator.export.build_raw_serving_input_receiver_fn({
-      'label_ids': label_ids,
-      'input_ids': input_ids,
-      'input_mask': input_mask,
-      'segment_ids': segment_ids,
-  })()
-  return input_fn
-
-
 def main(_):
+  hvd.init()
+  FLAGS.output_dir = FLAGS.output_dir if hvd.rank() == 0 else os.path.join(FLAGS.output_dir, str(hvd.rank()))
+  
   tf.logging.set_verbosity(tf.logging.INFO)
 
   processors = {
@@ -705,7 +685,7 @@ def main(_):
   tokenization.validate_case_matches_checkpoint(FLAGS.do_lower_case,
                                                 FLAGS.init_checkpoint)
 
-  if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_tfx_eval and not FLAGS.do_predict and not FLAGS.do_tfx_predict and not FLAGS.do_export:
+  if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_tfx_eval and not FLAGS.do_predict and not FLAGS.do_tfx_predict:
     raise ValueError(
         "At least one of `do_train`, `do_eval` or `do_predict' must be True.")
 
@@ -737,6 +717,10 @@ def main(_):
         FLAGS.tpu_name, zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
 
   is_per_host = tf.contrib.tpu.InputPipelineConfig.PER_HOST_V2
+
+  config = tf.ConfigProto()
+  config.gpu_options.visible_device_list = str(hvd.local_rank())
+
   run_config = tf.contrib.tpu.RunConfig(
       cluster=tpu_cluster_resolver,
       master=FLAGS.master,
@@ -745,7 +729,10 @@ def main(_):
       tpu_config=tf.contrib.tpu.TPUConfig(
           iterations_per_loop=FLAGS.iterations_per_loop,
           num_shards=FLAGS.num_tpu_cores,
-          per_host_input_for_training=is_per_host))
+          per_host_input_for_training=is_per_host),
+      log_step_count_steps=25,
+      session_config=config)
+
 
   train_examples = None
   num_train_steps = None
@@ -755,6 +742,8 @@ def main(_):
     num_train_steps = int(
         len(train_examples) / FLAGS.train_batch_size * FLAGS.num_train_epochs)
     num_warmup_steps = int(num_train_steps * FLAGS.warmup_proportion)
+    num_train_steps = num_train_steps // hvd.size()
+    num_warmup_steps = num_warmup_steps // hvd.size()
 
   model_fn = model_fn_builder(
       bert_config=bert_config,
@@ -789,38 +778,16 @@ def main(_):
         seq_length=FLAGS.max_seq_length,
         is_training=True,
         drop_remainder=True)
-    estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
-
+    hooks = [hvd.BroadcastGlobalVariablesHook(0)]
+    estimator.train(input_fn=train_input_fn, max_steps=num_train_steps, hooks=hooks)
 
   if FLAGS.do_tfx_eval:
     eval_examples = processor.get_dev_examples(FLAGS.data_dir)
     num_actual_eval_examples = len(eval_examples)
-    if FLAGS.use_tpu:
-      # TPU requires a fixed batch size for all batches, therefore the number
-      # of examples must be a multiple of the batch size, or else examples
-      # will get dropped. So we pad with fake examples which are ignored
-      # later on. These do NOT count towards the metric (all tf.metrics
-      # support a per-instance weight, and these get a weight of 0.0).
-      while len(eval_examples) % FLAGS.eval_batch_size != 0:
-        eval_examples.append(PaddingInputExample())
     
     eval_file = os.path.join(FLAGS.output_dir, "eval.tf_record")
     file_based_convert_examples_to_features(
         eval_examples, label_list, FLAGS.max_seq_length, tokenizer, eval_file)
-
-    tf.logging.info("***** Running evaluation *****")
-    tf.logging.info("  Num examples = %d (%d actual, %d padding)",
-                    len(eval_examples), num_actual_eval_examples,
-                    len(eval_examples) - num_actual_eval_examples)
-    tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
-
-    # This tells the estimator to run through the entire set.
-    eval_steps = None
-    # However, if running eval on the TPU, you will need to specify the
-    # number of steps.
-    if FLAGS.use_tpu:
-      assert len(eval_examples) % FLAGS.eval_batch_size == 0
-      eval_steps = int(len(eval_examples) // FLAGS.eval_batch_size)
 
     eval_drop_remainder = True if FLAGS.use_tpu else False
     eval_input_fn = file_based_input_fn_builder(
@@ -855,9 +822,6 @@ def main(_):
         elif line.split("\t", 1)[0] == 'semi-aligned':
           y.append(3)
 
-    while len(y) != len(y_):
-      y_.pop()
-
     with open(FLAGS.data_dir+'/incorrect.tsv', mode='w+', encoding='utf-8') as new_file:
       new_file.write("actual\tprediction\tsentence-1\tsentence-2\n")
       for idx, val in enumerate(y_):
@@ -871,20 +835,13 @@ def main(_):
   if FLAGS.do_tfx_predict:
     # each predict file can only be 100000k big
     # Use: split -b 100000k AAA.tsv test.tsv
-    os.chdir(FLAGS.data_dir)
+    os.chdir("./data")
     for filename in glob.glob("test*"):
-      exists = os.path.isfile(FLAGS.data_dir+'/results/good_align_'+re.split('[.]',filename)[0]+'.tsv')
+      exists = os.path.isfile(FLAGS.data_dir+'/results/good_align_'+re.split('[.]',filename)[1]+'.tsv')
       if not exists:
         print(filename)
         predict_examples = processor.get_test_examples(FLAGS.data_dir, filename)
         num_actual_predict_examples = len(predict_examples)
-        if FLAGS.use_tpu:
-          # TPU requires a fixed batch size for all batches, therefore the number
-          # of examples must be a multiple of the batch size, or else examples
-          # will get dropped. So we pad with fake examples which are ignored
-          # later on.
-          while len(predict_examples) % FLAGS.predict_batch_size != 0:
-            predict_examples.append(PaddingInputExample())
 
         predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
         file_based_convert_examples_to_features(predict_examples, label_list,
@@ -906,10 +863,10 @@ def main(_):
 
         result = estimator.predict(input_fn=predict_input_fn)
 
-        with open(FLAGS.data_dir+'/results/great_align_'+re.split('[.]',filename)[0]+'.tsv', mode='w', encoding='utf-8') as great_align_file:
-          with open(FLAGS.data_dir+'/results/good_align_'+re.split('[.]',filename)[0]+'.tsv', mode='w', encoding='utf-8') as good_align_file:
-            with open(FLAGS.data_dir+'/results/not_align_'+re.split('[.]',filename)[0]+'.tsv', mode='w', encoding='utf-8') as not_align_file:
-              with open(FLAGS.data_dir+'/results/semi_align_'+re.split('[.]',filename)[0]+'.tsv', mode='w', encoding='utf-8') as semi_align_file:            
+        with open(FLAGS.data_dir+'/results/great_align_'+re.split('[.]',filename)[1]+'.tsv', mode='w', encoding='utf-8') as great_align_file:
+          with open(FLAGS.data_dir+'/results/good_align_'+re.split('[.]',filename)[1]+'.tsv', mode='w', encoding='utf-8') as good_align_file:
+            with open(FLAGS.data_dir+'/results/not_align_'+re.split('[.]',filename)[1]+'.tsv', mode='w', encoding='utf-8') as not_align_file:
+              with open(FLAGS.data_dir+'/results/semi_align_'+re.split('[.]',filename)[1]+'.tsv', mode='w', encoding='utf-8') as semi_align_file:            
                 num_written_lines = 0
                 tf.logging.info("***** Predict results *****")
                 for (i, prediction) in enumerate(result):
@@ -926,16 +883,7 @@ def main(_):
                   else:                
                     semi_align_file.write(output_line)                            
                   num_written_lines += 1
-              semi_align_file.closed
-            not_align_file.closed
-          good_align_file.closed
-        great_align_file.closed
         assert num_written_lines == num_actual_predict_examples
-
-  if FLAGS.do_export:
-    estimator._export_to_tpu = False
-    estimator.export_savedmodel(FLAGS.export_dir, serving_input_fn)
-
 
 if __name__ == "__main__":
   flags.mark_flag_as_required("data_dir")
